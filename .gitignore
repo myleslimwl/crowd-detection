@@ -1,1 +1,41 @@
+# Ignore the Python virtual environment
 crowd-detection-env/
+
+# Ignore Python cache and bytecode
+__pycache__/
+*.py[cod]
+*.so
+
+# Ignore environment files
+.env
+*.env
+
+# Ignore model weights larger than 100MB (optional if using Git LFS)
+*.pth
+
+# Ignore datasets
+data/
+*.mat
+
+# Ignore large video/image/temp assets
+*.avi
+*.mp4
+*.mov
+*.png
+*.jpg
+*.jpeg
+
+# Ignore logs and debug artifacts
+*.log
+*.out
+*.bak
+
+# Ignore Jupyter checkpoint files
+.ipynb_checkpoints/
+
+# Ignore system files (Windows/macOS)
+Thumbs.db
+.DS_Store
+
+# Ignore VSCode settings (optional)
+.vscode/
