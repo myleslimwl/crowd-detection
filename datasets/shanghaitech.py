@@ -15,7 +15,7 @@ class ShanghaiTechDataset(Dataset):
         self.root = root
         self.split = split
         self.img_dir = os.path.join(root, f'{split}_data', 'images')
-        self.gt_dir = os.path.join(root, f'{split}_data', 'ground_truth')  # ✅ make sure this matches renamed folder
+        self.gt_dir = os.path.join(root, f'{split}_data', 'ground_truth')
 
         image_paths = sorted(glob.glob(os.path.join(self.img_dir, '*.jpg')))
         self.image_paths = []
@@ -34,7 +34,7 @@ class ShanghaiTechDataset(Dataset):
         assert len(self.image_paths) > 0, "❌ No valid image-GT pairs found!"
 
         self.transform = transforms.Compose([
-            transforms.Resize((128, 128)),  # ✅ Resize for training compatibility
+            transforms.Resize((128, 128)),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                  std=[0.229, 0.224, 0.225])
@@ -51,11 +51,11 @@ class ShanghaiTechDataset(Dataset):
         img_tensor = self.transform(img)
 
         mat = sio.loadmat(gt_path)
-        points = mat["image_info"][0][0][0][0][0]  # shape (N, 2)
+        points = mat["image_info"][0][0][0][0][0]
 
-        img_h, img_w = img.size[1], img.size[0]  # height, width
+        img_h, img_w = img.size[1], img.size[0]
         density = generate_density_map((img_h, img_w), points)
-        density = cv2.resize(density, (256, 256))  # ✅ Matches final output size of model
+        density = cv2.resize(density, (256, 256))
         density_tensor = torch.from_numpy(density).unsqueeze(0).float()
 
         return img_tensor, density_tensor, points
