@@ -1,66 +1,54 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torchvision import models
 
 
 class RegressionBranch(nn.Module):
+    """
+    A simple convolutional regression branch to estimate crowd density maps.
+    Based on a truncated VGG16 backbone.
+    """
     def __init__(self):
         super(RegressionBranch, self).__init__()
-        self.features = nn.Sequential(
-            nn.Conv2d(3, 64, 3, padding=1),  # Input: (3, H, W)
-            nn.ReLU(inplace=True),
-            nn.Conv2d(64, 64, 3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),  # downsample by 2
+        vgg = models.vgg16_bn(pretrained=True)
+        self.features = nn.Sequential(*list(vgg.features.children())[:33])  # up to conv5_3
 
-            nn.Conv2d(64, 128, 3, padding=1),
+        self.regressor = nn.Sequential(
+            nn.Conv2d(512, 256, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
-            nn.Conv2d(128, 128, 3, padding=1),
+            nn.Conv2d(256, 128, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),
-
-            nn.Conv2d(128, 256, 3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(256, 256, 3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),
-
-            nn.Conv2d(256, 512, 3, padding=1),
-            nn.ReLU(inplace=True)
-        )
-
-        self.output_layer = nn.Sequential(
-            nn.Conv2d(512, 1, 1),  # Output: density map
-            nn.ReLU(inplace=True)
+            nn.Conv2d(128, 1, kernel_size=1)  # output 1-channel density map
         )
 
     def forward(self, x):
         x = self.features(x)
-        x = F.interpolate(x, size=(256, 256), mode='bilinear', align_corners=False)
-        return self.output_layer(x)
+        x = self.regressor(x)
+        x = F.interpolate(x, size=(x.shape[2] * 8, x.shape[3] * 8), mode='bilinear', align_corners=False)  # upscale
+        return x
 
 
 class AttentionBranch(nn.Module):
+    """
+    An attention module to generate spatial attention weights.
+    """
     def __init__(self):
         super(AttentionBranch, self).__init__()
-        self.features = nn.Sequential(
-            nn.Conv2d(3, 64, 3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),
+        vgg = models.vgg16_bn(pretrained=True)
+        self.features = nn.Sequential(*list(vgg.features.children())[:33])  # same as regression branch
 
-            nn.Conv2d(64, 128, 3, padding=1),
+        self.attention = nn.Sequential(
+            nn.Conv2d(512, 256, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),
-
-            nn.Conv2d(128, 256, 3, padding=1),
+            nn.Conv2d(256, 128, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),
-
-            nn.Conv2d(256, 1, 1),
-            nn.Sigmoid()  # Values in [0, 1] for attention weights
+            nn.Conv2d(128, 1, kernel_size=1),
+            nn.Sigmoid()  # attention mask between 0 and 1
         )
 
     def forward(self, x):
         x = self.features(x)
-        x = F.interpolate(x, size=(256, 256), mode='bilinear', align_corners=False)
+        x = self.attention(x)
+        x = F.interpolate(x, size=(x.shape[2] * 8, x.shape[3] * 8), mode='bilinear', align_corners=False)  # upscale
         return x

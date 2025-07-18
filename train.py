@@ -1,61 +1,107 @@
 import os
-import glob
-import numpy as np
-import scipy.io as sio
-import cv2
-from PIL import Image
+import argparse
 import torch
-from torch.utils.data import Dataset
-from torchvision import transforms
-from utils.generate_density_map import generate_density_map
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+
+from models.decidenet_model import DecideNet
+from my_dataset import load_dataset
 
 
-class ShanghaiTechDataset(Dataset):
-    def __init__(self, root='data/shanghaitech/Part_B', split='train'):
-        self.root = root
-        self.split = split
-        self.img_dir = os.path.join(root, f'{split}_data', 'images')
-        self.gt_dir = os.path.join(root, f'{split}_data', 'ground_truth')  # ✅ updated here
+def custom_collate(batch):
+    imgs, densities, points = zip(*batch)
+    imgs = torch.stack(imgs, 0)
+    densities = torch.stack(densities, 0)
+    return imgs, densities, list(points)
 
-        image_paths = sorted(glob.glob(os.path.join(self.img_dir, '*.jpg')))
-        self.image_paths = []
-        self.gt_paths = []
 
-        for img_path in image_paths:
-            base_name = os.path.basename(img_path).replace('.jpg', '')
-            gt_name = f'GT_{base_name}.mat'
-            gt_path = os.path.join(self.gt_dir, gt_name)
-            if os.path.exists(gt_path):
-                self.image_paths.append(img_path)
-                self.gt_paths.append(gt_path)
-            else:
-                print(f"⚠️ Missing GT file for {img_path}, skipping...")
+def train(dataset_name, batch_size, epochs, lr, save_dir, resume=None):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        assert len(self.image_paths) > 0, "❌ No valid image-GT pairs found!"
+    train_data = load_dataset(name=dataset_name, split="train")
+    train_loader = DataLoader(
+        train_data,
+        batch_size=batch_size,
+        shuffle=True,
+        collate_fn=custom_collate
+    )
 
-        self.transform = transforms.Compose([
-            transforms.Resize((128, 128)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                 std=[0.229, 0.224, 0.225])
-        ])
+    print(f"✅ {len(train_data)} image-GT pairs loaded from: {train_data.root}")
 
-    def __len__(self):
-        return len(self.image_paths)
+    model = DecideNet().to(device)
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+    criterion = nn.MSELoss()
 
-    def __getitem__(self, idx):
-        img_path = self.image_paths[idx]
-        gt_path = self.gt_paths[idx]
+    start_epoch = 0
+    if resume and os.path.exists(resume):
+        checkpoint = torch.load(resume, map_location=device)
+        model.load_state_dict(checkpoint["model_state_dict"])
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        start_epoch = checkpoint["epoch"] + 1
+        print(f"🔁 Resumed training from checkpoint at epoch {start_epoch}")
 
-        img = Image.open(img_path).convert("RGB")
-        img_tensor = self.transform(img)
+    os.makedirs(save_dir, exist_ok=True)
 
-        mat = sio.loadmat(gt_path)
-        points = mat["image_info"][0][0][0][0][0]
+    for epoch in range(start_epoch, epochs):
+        model.train()
+        epoch_loss = 0.0
+        loop = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}")
 
-        img_h, img_w = img.size[1], img.size[0]
-        density = generate_density_map((img_h, img_w), points)
-        density = cv2.resize(density, (256, 256))
-        density_tensor = torch.from_numpy(density).unsqueeze(0).float()
+        for imgs, gt_densities, points_list in loop:
+            imgs = imgs.to(device)
+            gt_densities = gt_densities.to(device)
 
-        return img_tensor, density_tensor, points
+            targets = []
+            for points in points_list:
+                boxes = [[x, y, x + 1, y + 1] for x, y in points]
+                labels = [1] * len(points)
+                targets.append({
+                    'boxes': torch.tensor(boxes, dtype=torch.float32).to(device),
+                    'labels': torch.tensor(labels, dtype=torch.int64).to(device)
+                })
+
+            optimizer.zero_grad()
+            final_output, reg_output, det_output, att_map, det_losses = model(imgs, targets)
+
+            reg_loss = criterion(final_output, gt_densities)
+            det_loss = sum(det_losses.values()) if isinstance(det_losses, dict) else det_losses
+            total_loss = reg_loss + det_loss
+
+            total_loss.backward()
+            optimizer.step()
+
+            epoch_loss += total_loss.item()
+            loop.set_postfix(loss=total_loss.item())
+
+        avg_loss = epoch_loss / len(train_loader)
+        print(f"📉 Epoch {epoch+1} Avg Loss: {avg_loss:.6f}")
+
+        save_path = os.path.join(save_dir, f"model_epoch_{epoch+1}.pth")
+        torch.save({
+            "epoch": epoch,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict()
+        }, save_path)
+        print(f"💾 Checkpoint saved to {save_path}")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Train DecideNet for crowd counting")
+    parser.add_argument("--dataset", type=str, required=True, help="Dataset name: shanghaitech/jhu/mall")
+    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--lr", type=float, default=1e-5)
+    parser.add_argument("--save_dir", type=str, default="checkpoints")
+    parser.add_argument("--resume", type=str, default=None)
+    args = parser.parse_args()
+
+    train(
+        dataset_name=args.dataset,
+        batch_size=args.batch_size,
+        epochs=args.epochs,
+        lr=args.lr,
+        save_dir=args.save_dir,
+        resume=args.resume
+    )

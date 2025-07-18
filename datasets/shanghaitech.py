@@ -1,61 +1,57 @@
 import os
-import glob
-import numpy as np
 import scipy.io as sio
+import numpy as np
 import cv2
-from PIL import Image
 import torch
 from torch.utils.data import Dataset
-from torchvision import transforms
 from utils.generate_density_map import generate_density_map
 
 
 class ShanghaiTechDataset(Dataset):
-    def __init__(self, root='data/shanghaitech/Part_B', split='train'):
-        self.root = root
+    def __init__(self, root, split="train", part="B", transform=None):
+        assert part in ["A", "B"], "part must be 'A' or 'B'"
+        self.transform = transform
         self.split = split
-        self.img_dir = os.path.join(root, f'{split}_data', 'images')
-        self.gt_dir = os.path.join(root, f'{split}_data', 'ground_truth')
+        self.root = root
+        self.part = part
 
-        image_paths = sorted(glob.glob(os.path.join(self.img_dir, '*.jpg')))
-        self.image_paths = []
-        self.gt_paths = []
+        base_dir = os.path.join(root, f"Part_{part}")
+        self.image_dir = os.path.join(base_dir, f"{split}_data", "images")
+        self.gt_dir = os.path.join(base_dir, f"{split}_data", "ground_truth")
 
-        for img_path in image_paths:
-            base_name = os.path.basename(img_path).replace('.jpg', '')
-            gt_name = f'GT_{base_name}.mat'
-            gt_path = os.path.join(self.gt_dir, gt_name)
-            if os.path.exists(gt_path):
-                self.image_paths.append(img_path)
-                self.gt_paths.append(gt_path)
-            else:
-                print(f"⚠️ Missing GT file for {img_path}, skipping...")
+        self.samples = []
+        if not os.path.exists(self.image_dir):
+            raise FileNotFoundError(f"Image directory not found: {self.image_dir}")
+        if not os.path.exists(self.gt_dir):
+            raise FileNotFoundError(f"Ground truth directory not found: {self.gt_dir}")
 
-        assert len(self.image_paths) > 0, "❌ No valid image-GT pairs found!"
+        for img_name in os.listdir(self.image_dir):
+            if img_name.endswith(".jpg"):
+                img_path = os.path.join(self.image_dir, img_name)
+                mat_path = os.path.join(
+                    self.gt_dir, f"GT_{os.path.splitext(img_name)[0]}.mat"
+                )
+                if os.path.exists(mat_path):
+                    self.samples.append((img_path, mat_path))
 
-        self.transform = transforms.Compose([
-            transforms.Resize((128, 128)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                 std=[0.229, 0.224, 0.225])
-        ])
+        print(f"✅ Loaded {len(self.samples)} samples from {self.image_dir}")
 
     def __len__(self):
-        return len(self.image_paths)
+        return len(self.samples)
 
     def __getitem__(self, idx):
-        img_path = self.image_paths[idx]
-        gt_path = self.gt_paths[idx]
+        img_path, mat_path = self.samples[idx]
 
-        img = Image.open(img_path).convert("RGB")
-        img_tensor = self.transform(img)
+        img = cv2.imread(img_path)
+        if img is None:
+            raise RuntimeError(f"Failed to read image at: {img_path}")
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+        img = torch.from_numpy(img.transpose((2, 0, 1))).float()
 
-        mat = sio.loadmat(gt_path)
-        points = mat["image_info"][0][0][0][0][0]
+        mat = sio.loadmat(mat_path)
+        points = mat["image_info"][0][0][0][0][0]  # shape: (N, 2)
 
-        img_h, img_w = img.size[1], img.size[0]
-        density = generate_density_map((img_h, img_w), points)
-        density = cv2.resize(density, (256, 256))
-        density_tensor = torch.from_numpy(density).unsqueeze(0).float()
+        density_map = generate_density_map(img.shape[1:], points)
+        density_map = torch.from_numpy(density_map).unsqueeze(0).float()
 
-        return img_tensor, density_tensor, points
+        return img, density_map, points
