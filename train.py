@@ -11,7 +11,6 @@ from my_dataset import load_dataset
 
 
 def custom_collate(batch):
-    """Custom collate function to handle variable-length point annotations."""
     imgs, densities, points = zip(*batch)
     imgs = torch.stack(imgs, 0)
     densities = torch.stack(densities, 0)
@@ -21,7 +20,6 @@ def custom_collate(batch):
 def train(dataset_name, batch_size, epochs, lr, save_dir, resume=None):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Load dataset
     train_data = load_dataset(name=dataset_name, split="train")
     train_loader = DataLoader(
         train_data,
@@ -32,7 +30,6 @@ def train(dataset_name, batch_size, epochs, lr, save_dir, resume=None):
 
     print(f"✅ {len(train_data)} image-GT pairs loaded from: {train_data.root}")
 
-    # Initialize model
     model = DecideNet().to(device)
     optimizer = optim.Adam(model.parameters(), lr=lr)
     criterion = nn.MSELoss()
@@ -47,33 +44,49 @@ def train(dataset_name, batch_size, epochs, lr, save_dir, resume=None):
 
     os.makedirs(save_dir, exist_ok=True)
 
-    # Training loop
     for epoch in range(start_epoch, epochs):
         model.train()
         epoch_loss = 0.0
-
         loop = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}")
-        for imgs, gt_densities, _ in loop:
+
+        for imgs, gt_densities, points_list in loop:
             imgs = imgs.to(device)
             gt_densities = gt_densities.to(device)
 
-            # Forward pass
-            final_output, reg_output, det_output, att_map = model(imgs)
-
-            # Loss computation
-            loss = criterion(final_output, gt_densities)
+            # Create detection targets
+            targets = []
+            for points in points_list:
+                boxes = []
+                labels = []
+                for pt in points:
+                    x, y = pt
+                    boxes.append([x, y, x + 1, y + 1])  # small box around each point
+                    labels.append(1)  # 1 = person
+                targets.append({
+                    "boxes": torch.tensor(boxes, dtype=torch.float32).to(device),
+                    "labels": torch.tensor(labels, dtype=torch.int64).to(device)
+                })
 
             optimizer.zero_grad()
-            loss.backward()
+
+            # Forward pass
+            final_output, reg_output, det_output, att_map, det_losses = model(imgs, targets)
+
+            # Combine losses: regression + detection + (optional attention)
+            reg_loss = criterion(final_output, gt_densities)
+            det_loss = sum(loss.detach() for loss in det_losses.values())  # detach detection loss
+            total_loss = reg_loss + det_loss  # optionally add attention loss
+
+            total_loss.backward()
             optimizer.step()
 
-            epoch_loss += loss.item()
-            loop.set_postfix(loss=loss.item())
+            epoch_loss += total_loss.item()
+            loop.set_postfix(loss=total_loss.item())
 
         avg_loss = epoch_loss / len(train_loader)
         print(f"📉 Epoch {epoch+1} Avg Loss: {avg_loss:.6f}")
 
-        # Save checkpoint
+        # Save model
         save_path = os.path.join(save_dir, f"model_epoch_{epoch+1}.pth")
         torch.save({
             "epoch": epoch,
@@ -86,11 +99,11 @@ def train(dataset_name, batch_size, epochs, lr, save_dir, resume=None):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train DecideNet for crowd counting")
     parser.add_argument("--dataset", type=str, required=True, help="Dataset name: shanghaitech")
-    parser.add_argument("--batch_size", type=int, default=4, help="Batch size")
-    parser.add_argument("--epochs", type=int, default=100, help="Number of training epochs")
-    parser.add_argument("--lr", type=float, default=1e-5, help="Learning rate")
-    parser.add_argument("--save_dir", type=str, default="checkpoints", help="Directory to save model checkpoints")
-    parser.add_argument("--resume", type=str, default=None, help="Path to resume checkpoint")
+    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--lr", type=float, default=1e-5)
+    parser.add_argument("--save_dir", type=str, default="checkpoints")
+    parser.add_argument("--resume", type=str, default=None)
 
     args = parser.parse_args()
 
